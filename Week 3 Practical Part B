@@ -1,0 +1,107 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Oct 17 11:39:31 2025
+
+@author: b08319tb
+"""
+
+"""
+Understanding GIS: Practical 3 (Vectorised Alternative)
+@author jonnyhuck
+
+This approach uses higher-level functionality of geopandas to speed up the analysis
+"""
+
+from time import perf_counter
+from geopandas import read_file
+from matplotlib.pyplot import subplots, savefig
+from matplotlib_scalebar.scalebar import ScaleBar
+
+
+# set start time
+start_time = perf_counter() 
+
+# pop_points = read_file("../../data/gulu/pop_points.shp")
+# water_points = read_file("../../data/gulu/water_points.shp")
+# gulu_district = read_file("../../data/gulu/district.shp")
+
+# read in the shapefiles, and match up the CRS'
+pop_points = read_file("../../data/gulu/pop_points.shp")
+water_points = read_file("../../data/gulu/water_points.shp").to_crs(pop_points.crs)
+gulu_district = read_file("../../data/gulu/district.shp").to_crs(pop_points.crs)
+
+''' STAGE 1 - FILTERING THE DATA WITH A SPATIAL QUERY - EXTRACT ONLY WELLS INSIDE THE DISTRICT '''
+
+# get the one and only polygon from the district dataset (buffer by 10.5km to account for edge cases)
+polygon = gulu_district.geometry.iloc[0].buffer(10500)
+
+# construct the spatial index
+water_points.sindex
+
+# get the wells within the district
+print(f"\nInitial wells: {len(water_points)}")
+precise_matches = water_points.loc[water_points.within(polygon)]
+print(f"Filtered wells: {len(water_points)}")
+
+
+''' STAGE 2 - NEAREST NEIGHBOUR - find distance to nearest well for everybody'''
+
+# ensure a new spatial index has been constructed on the new, smaller dataset
+precise_matches.sindex
+
+# use vectorised neares neighbour & distance calc
+_, distances = precise_matches.sindex.nearest(pop_points.geometry, return_all=False, return_distance=True)
+pop_points["nearest_well"] = distances
+
+# output the result
+print(f"Minimum distance to water in Gulu District: {pop_points['nearest_well'].min():,.0f}m.")
+print(f"Mean distance to water in Gulu District: {pop_points['nearest_well'].mean():,.0f}m.")
+print(f"Maximum distance to water in Gulu District: {pop_points['nearest_well'].max():,.0f}m.")
+
+# finish timer
+print(f"completed in: {perf_counter() - start_time:.2f} seconds")
+
+# create map axis object
+fig, my_ax = subplots(1, 1, figsize=(16, 10))
+
+# remove axes
+my_ax.axis('off')
+
+# add title
+my_ax.set_title("Distance to Nearest Well, Gulu District, Uganda")
+
+# add the district boundary
+gulu_district.plot(
+    ax = my_ax,
+    color = (0, 0, 0, 0),	# this is (red, green, blue, alpha) and means black, but transparent (alpha=0)
+    linewidth = 1,
+	edgecolor = 'black',	# this is just a shortcut for (0, 0, 0, 1)
+    )
+
+# plot the locations, coloured by distance to water
+pop_points.plot(
+    ax = my_ax,
+    column = 'nearest_well',
+    linewidth = 0,
+	markersize = 1,
+    cmap = 'RdYlBu_r',
+    scheme = 'quantiles',
+    legend = 'True',
+    legend_kwds = {
+        'loc': 'lower right',
+        'title': 'Distance to Nearest Well'
+        }
+    )
+
+# add north arrow
+x, y, arrow_length = 0.98, 0.99, 0.1
+my_ax.annotate('N', xy=(x, y), xytext=(x, y-arrow_length),
+	arrowprops=dict(facecolor='black', width=5, headwidth=15),
+	ha='center', va='center', fontsize=20, xycoords=my_ax.transAxes)
+
+# add scalebar
+my_ax.add_artist(ScaleBar(dx=1, units="m", location="lower left", length_fraction=0.25))
+
+# save the result
+savefig('out/3-vector.png', bbox_inches='tight')
+print("done!")
