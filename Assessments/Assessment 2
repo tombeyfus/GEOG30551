@@ -1,0 +1,227 @@
+"""
+Understanding GIS: Assessment 2
+@author [11076186]
+"""
+
+'''Timer'''
+from time import perf_counter
+
+# --- NO CODE ABOVE HERE ---
+
+'''Import Statements'''
+
+#Used for processing files, spatial indexing, creating a mask and converting between image and coordinate space
+from geopandas import read_file
+from rasterio import open as rio_open
+from rasterio.transform import rowcol
+from rasterio.plot import show as rio_show
+from rasterio.mask import mask
+
+#Used for calculation, coordinates, constructing a circle, creating an empty layer etc..
+from numpy import zeros, column_stack
+from shapely.geometry import Point
+from skimage.draw import disk
+from numpy.random import uniform
+from math import sqrt, pi
+
+#Used for producing the map
+from matplotlib.pyplot import subplots, savefig
+from matplotlib_scalebar.scalebar import ScaleBar
+from matplotlib.colors import Normalize
+from matplotlib.cm import ScalarMappable
+from matplotlib.lines import Line2D
+
+'''1. Definitions'''
+
+#Set start time
+start_time = perf_counter()	
+
+#Define coordinate to image space conversion
+def coord_2_img(transform, x, y):
+
+    #row(r) and col(c) calculated from coordinates
+	r, c = rowcol(transform, x, y)
+
+    #Return an integer value for the row and col from the coordinates
+	return (int(r), int(c))
+
+#As explained in my report, the choice of these variables is entirely subjective for how 'accurate' results are
+#I chose both variables based on efficiency and how reproducible the results would be between runs
+#w = [user defined] desired influence of weighting surface, greater w means more points sampled
+w = 20
+
+#s = [user defined] desired level of spatial ambiguity, how large the circles constructed around the points are, 
+#Larger s improves visual 'smoothness' of map output, lower efficiency but increased area over which population layer has influence 
+s = 0.1 
+
+'''2. Main Code'''
+
+#Make sure python script can be called from another script
+if __name__ == "__main__":
+
+        '''2.1 Opening the datasets'''
+
+        #wsp (weighted surface population dataset) used to define the raster file
+        with rio_open('./data/wr/100m_pop_2019.tif') as wsp:
+
+            #Extract the first band of the raster dataset, so it can be used to create an empty raster file
+            wsp_data = wsp.read(1)
+
+            #Create a new empty band for the raster data, this will be populated later with the results
+            output_surface = zeros(wsp_data.shape)
+
+            #Administration levels and boundaries in Greater Manchester (of which there are 9) opened as admin_areas
+            admin_areas = read_file('./data/wr/gm-districts.shp')
+
+            #Tweet data opened, 
+            #Initial print statements show its projection does not match the others, reprojected onto correct CRS
+            tweet_data = read_file('./data/wr/level3-tweets-subset.shp').to_crs('EPSG: 27700')
+
+            '''2.2 Initial for loop and spatial index'''
+
+            #Construct a spatial index from the tweet_data using principles from prac 3
+            tweet_index = tweet_data.sindex
+
+            #For each district in Greater Manchester loop constructed
+            #Print statements for admin splits GM into 9 boroughs
+            for idx, admin in admin_areas.iterrows():              
+
+                #Bounding radius of each admin area found, used later for finding random point within this bounding box    
+                minx, miny, maxx, maxy = admin.geometry.bounds
+
+                #Filter out tweets that don't intersect with the admin's geometry
+                possible_tweets_index = tweet_index.intersection(admin.geometry.bounds)
+
+                #Creates a new geodata frame with the possible tweets within it, reducing processing as all tweets don't have to be checked
+                possible_tweets = tweet_data.iloc[possible_tweets_index]    
+
+                #Tweets found within the geometry of each admin area, 
+                #[] used to select all values and not boolean values (prevent data loss), after initial print statements and early errors produced true/false results
+                tweets_within = possible_tweets[possible_tweets.intersects(admin.geometry)]                
+
+                '''2.3 Equation 1: creating a radius around each weighted point'''
+
+                #Find the radius surrounding the random point to construct a circle with later,
+                #only needs to be found once for each admin, so moved up here instead of below as in the original pseudocode
+                #The spatial ambiguity (s) determines the size of the radius, 
+                #by increasing s you increase the amount of spatial ambiguity by increasing the radius and thus the area around the point that will be sampled and the area over which tweets are likely to come from
+                radius_m = sqrt((admin.geometry.area * s)/pi)
+
+                #Convert the radius from meters (coordinate space) to pixels (image space), make sure an integer is produced using int function
+                #Divide the radius in meters by the cell width (which is located through wsp.transform[0]) to count the amount of cells (methods from prac 7)
+                radius_px = int(radius_m / wsp.transform[0])
+
+                '''2.4 Generating a random point from each tweet'''
+
+                #Loop created which loops through each tweet within the administration area
+                for t, tweets in tweets_within.iterrows():
+
+                    #create empty list to store the random points generated from the tweet,
+                    random_tweet_within_district = []   
+
+                    #While length of this list is smaller than the weighting surface continue, keep going until we have 'w' points 
+                    #Essentially the weighting surface (w) changes resolution of the data by increasing/decreasing the amount of random points generated per tweet
+                    while len(random_tweet_within_district) < w:
+
+                        #Using the uniform method from practical 5 to get random x and y coordinates within the administration area's bounds (call back to earlier)
+                        xs = uniform(low=minx, high=maxx)
+                        ys = uniform(low=miny, high=maxy)
+
+                        #Define a random point (tweet) using those random coordinates
+                        random_tweet = Point(xs, ys)
+
+                        #If those random points are within the geometry of an admin area, append them to the list, which will fill up until there are 20 points
+                        if random_tweet.within(admin.geometry):
+                                random_tweet_within_district.append(random_tweet)
+
+                    '''2.5 Finding the random point with the highest population density value'''
+
+                    #Values initiated for use later on
+                    #Max value defined as infinitely small so the first value in the loop will be bigger than it
+                    max_value = float('-inf')
+
+                    #max_tweet created for the random tweet with the largest population density value, this becomes the new 'seed' tweet for later calculations
+                    #None used instead of a list (from prac 9 and 11) as only one result is required
+                    max_tweet = None
+
+                    #loop through those 20 random tweets to find tweet with highest value
+                    for r_tweet in random_tweet_within_district:
+
+                        #call upon coord_2_img function to convert the tweets locations in coordinate space to image space
+                        row, col = coord_2_img(wsp.transform, r_tweet.x, r_tweet.y)
+
+                        #If statement used to make sure location (row, col) of tweet is within bounds of the dataset
+                        if 0 <= row < wsp.height and 0 <= col < wsp.width:
+
+                            #Find the population density at the random point by calling upon the raster data (from prac 6 and 7)
+                            pop_den_at_point = wsp_data[row, col]
+
+                        #If data is not within the bounds of dataset, continue
+                        else:
+                            continue                   
+
+                        #If the population density at that random tweet is bigger than the maximum value:
+                        if pop_den_at_point > max_value:
+
+                            #Max value is then replaced if the population density is bigger
+                            max_value = pop_den_at_point
+
+                            #The max tweet is then replaced with the random tweet with the highest population density
+                            max_tweet = r_tweet
+
+                    #Final check to see if max_tweet is a valid point using if statement, then use it for calculations later    
+                    if max_tweet is not None:
+
+                        '''2.6 Equation 2: creating a circle and populating the output'''
+
+                        #Convert max tweet into image space for upcoming equation which calls upon the radius
+                        max_tweet_row, max_tweet_col = coord_2_img(wsp.transform, max_tweet.x, max_tweet.y)
+
+                        #Disk function used (from prac 7) to construct a solid circle with the radius from equation 1 around the max_tweet point
+                        rr, cc = disk(
+                            (max_tweet_row, max_tweet_col),
+
+                            #Radius calculated from Equation 1 used here
+                            radius_px,
+
+                            #Shape is using the raster files shape to make sure disk stays within bounds, preventing it from 'going off the edge' and generating errors 
+                            shape=wsp_data.shape)
+
+                        #Loop through each cell in the circle constructed
+                        #Column stack (from prac 7) stacks two one dimensional arrays into into a two dimensional array [x, x, x, x, etc] and [y, y, y, y, etc] into [x, y, etc]
+                        for row, col in column_stack((rr, cc)):                            #
+                        for row, col in column_stack((rr, cc)):                            
+
+                            #Distance calculated between the tweet's (seed) row/col and the row/col of each cell in the circle
+                            row_distance_from_tweet = max_tweet_row - row
+@@ -250,29 +250,29 @@
+#Add scalebar
+my_ax.add_artist(ScaleBar(dx=1, units="m", location="lower right")) 
+
+#Add colourbar from principles from prac 7, define is as cb so it can be edited later
+#Add colourbar from principles from prac 7, defined as cb so it can be edited later
+cb=fig.colorbar(ScalarMappable(norm=Normalize(vmin=0, vmax=1), cmap='RdYlBu_r'), ax=my_ax, pad=0.01)  
+
+#Using forum from stack overflow, used ax.text to set small labels at the  top and bottom of the colour bar
+cb.ax.text(0.97, 1.01, "Most Tweet Activity", fontsize=8, rotation=360, ha='left', va='bottom')
+cb.ax.text(0.97, -0.03, "Least Tweet Activity", fontsize=8, rotation=360, ha='left', va='bottom')
+cb.ax.text(1.12, 0.5, "Likelihood of Tweet (0-1)", fontsize=10, rotation=360, ha='left', va='bottom')
+
+#Remove axis
+my_ax.axis('off')
+
+#Add title
+my_ax.set_title("Likelihood of Tweet Activity About the 2011 Royal Wedding in Greater Manchester (GM)")
+
+#Add legend
+my_ax.legend(
+    handles=[
+        Line2D([0], [0], color='black', linewidth=2, label='Administrative Boundaries of GM')
+    ], loc='lower left')
+
+#Save the result
+savefig('./out/Final_Map.png', bbox_inches='tight')
+
+# --- NO CODE BELOW HERE ---
+
+# report runtime
