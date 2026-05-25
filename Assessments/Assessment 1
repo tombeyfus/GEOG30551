@@ -1,0 +1,310 @@
+"""
+Understanding GIS: Assessment 1
+@gis-11076186 [11076186]
+"""
+
+#timer set up to measure time for code to run
+from time import perf_counter
+
+# set start time
+start_time = perf_counter()	
+
+# --- NO CODE ABOVE HERE ---
+
+'''
+Import Statements
+'''
+
+#read_file used for unpacking shapefile, Geoseries used for unpacking spatial data
+from geopandas import read_file, GeoSeries
+
+#Used to call upon complex maths calculations for vincenty equation
+from pyproj import Geod
+
+#Used for map features, saving the map as a PNG, patch used to assign colours, inserting a line to represent border
+from matplotlib.pyplot import subplots, savefig, title
+from matplotlib_scalebar.scalebar import ScaleBar
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
+
+#Used to gather geometries from a dataset and create a spatial index
+from shapely import STRtree
+
+'''
+Part 1 Initial Defenitions
+'''
+
+#distance calculations to find the borders lengths is defined for later use
+#calls upon border defenition (intersection) and g which represents the geodetic system WGS84 (as shown later)
+def distancecalculation(g, border):
+    
+#initialise a variable to hold the borders length    
+    border_length = 0
+    
+#slightly different calculations needed for MultiLineStrings(MLS) and LineStrings(LS) as MLS's have multiple segments wheras LS's have only one segment, so only one measurement is required   
+    if border.geom_type == 'MultiLineString':
+        
+        #loop through segments in the border (which is defined later as the intersection between country_a and country_b)
+                for segment in border.geoms:
+                    
+                    #Using vincenty equation (explained below) to find distance between start and end points in each segment of the MLS, using [] to locate data within each segment
+                    #[0][0] is start longitude, [0][1] is start latitude, [1][0] is end longitude, [1][1] is end latitude - basically creates start and end point to measure distance between
+                    #Vincenty called upon using g(geod).inv to calculate distance between two points (from start to end of each segment of the MultiLineString)
+                    #no need for direction, only distance                   
+                    distance = g.inv(segment.coords[0][0], segment.coords[0][1], segment.coords[1][0], segment.coords[1][1])[2]
+                    #[2] at the end of equation used to locate third value in the list (distance) within the border variable. [0] and [1] which are country a and b need to be filtered out
+                    
+                    #distance added to border_length
+                    border_length += distance  
+                   
+#some borders geometry types are Linestrings, so elif used to iterate through countries with these borders 
+    elif border.geom_type == 'LineString':
+        #no need for 'for' loop
+        
+                    #same equation used however as there are no segments, border is used instead to locate the coordinates of the start and end points of the LineString      
+                    distance = g.inv(border.coords[0][0], border.coords[0][1], border.coords[1][0], border.coords[1][1])[2]
+                    
+                    #distance added to border_length
+                    border_length += distance
+                    
+    #end function and return value of border_length for when function is called upon later               
+    return border_length
+                  
+'''
+Part 2 Main Code: Reducing Rows in GeoDataFrame, Creating Spatial Indexes, Opening Lists and Assigning Values
+'''
+
+#make sure python script can be called from another script
+if __name__ == "__main__":
+
+    '''2.1 Loading the Dataset and Geod Object'''
+
+    #using read_file imported dataset defined as world which shows geometries and features of countries and other territories
+    world = read_file('data/natural-earth/ne_10m_admin_0_countries.shp')
+        
+    #function used to create geod object (defined as g) using the 'WGS84' model to make ellipsoid measurements (see below)
+    g = Geod(ellps='WGS84')
+    
+    '''2.2 Defining a Country'''
+    
+    #This method required constant revision due to a lack of understanding and the use of some material outside of lectures
+    #Using method from practical 2 to locate a specific column 'world.iloc[c]['TYPE'])' to filter out non-countries in the 'TYPE' column (dependencies, leases, indeterminates and disputed)
+    #Using stack overflow I found a method to use '|' instead of 'or' as a version to condense the code into one line, however I didn't fully understand it
+    #Instead a new list is created with a list of countries that match the defenition and a for loop which eliminates non-countries to create a new dataset called countries(explained better below)
+    #This method also reduces amount of rows from 255 to 207, closer to official measures of the numbers of countries
+    
+    #empty list created with countries that mattch defenition
+    countries_defenition = []
+    
+    #loop created for countries in the range of rows(255) in the world dataset
+    for c in range(len(world)):
+        
+        #using .iloc column 'TYPE' is located, if TYPE matches my defenition of Country/Sovereign Country, data is added to the list
+        if world.iloc[c]['TYPE'] == 'Sovereign country':
+        
+            #data added to list
+            countries_defenition.append(c)
+            
+        #same principlie as before using elif to catch countries which don't count as sovereign countries    
+        elif world.iloc[c]['TYPE'] == 'Country':
+            
+            #data added to list    
+            countries_defenition.append(c)
+        
+        #if TYPE is something else (not a country - e.g, dependency), using 'continue' the loop doesn't append it to my definition list
+        else:
+            continue
+    
+    #then using iloc again to locate rows in the world dataset which include the data from the list, print statement was then used to test the amount of columns in the countries dataset(207)
+    countries = world.iloc[countries_defenition]
+    
+    #This method also sped up run time, reducing the amount of pairs in the commencing loops from a possible ~32,000 to ~21,000 (amount of pairs if the index that is used later isn't created)
+          
+    '''2.3 Empty Lists Created and Values Assigned for Later Calculations'''
+    
+    #creating empty lists before the for loop
+    
+    #this list used to store distance calculations only, otherwise errors with Tuples and geometry type arise in later calculations
+    listofborderlengths = []
+    
+    #list created to store the shortest border, ultimately the result which will be printed
+    shortest_border = []
+    
+    #using inf data to set smallest_length as infinity to make sure first value in the for loop later is smaller than this
+    smallest_length = float('inf') 
+    
+    '''2.4 spatial index created to speed up results '''
+    
+    #get the geometries from the countries geodataframe as a list
+    geoms = countries.geometry.to_list()
+    
+    #initialise an instance of an STRtree using the geometries to create a spatial index
+    idx = STRtree(geoms)
+    
+    '''
+    Part 3 Main Code: Looping through countries to find borders and measure there length
+    '''
+        
+    '''3.1 For Loop to find bordering countries'''
+    
+    #loop through countries in the countries dataset
+    #two values in for loop as iterrows returns two values, we want to alter the country_ values, not a/b as they're just numbers
+    for a, country_a in countries.iterrows():
+        
+    #get the indexes of countries (a) that intersect bounds of another country (basically if they're within the same bounding box), then extract the possible matches (countries which potentially border)    
+    #only create possible_borders here and not precise matches here due to the fact we only need to find intersect so no need to do what the practical 3 did and find precise matches
+    #idx called upon here
+        possible_borders = countries.iloc[idx.query(country_a.geometry)]
+    
+        #loop through countries in new spatial index which only contains countries that border (intersect)
+        for b, country_b in possible_borders.iterrows():
+    
+    #if statements to remove countries which are the same, or countries which are ordered differently using < to compare strings (e.g, France, Germany and Germany, France -> becomes just France, Germany as a potential smallest border)        
+            if country_a.NAME == country_b.NAME or country_b.NAME < country_a.NAME:
+                continue
+            
+    #intersects used to determine if geometry of a and b have borders        
+            if country_a.geometry.intersects(country_b.geometry):
+                                                                                                            
+    #border defined as countries from two loops above that intersect, called upon in distance calculation        
+                border = country_a.geometry.intersection(country_b.geometry)
+                                                
+    #conditional statement to remove point data and avoid later errors             
+                if border.geom_type == "Point":
+                  continue
+                
+    #distance statement calculation called upon to calculate border lengths of all bordering countries found so far           
+                border_length = distancecalculation(g, border)
+    
+    #names of bordering countries and their lengths added to empty list called 'listofborderlengths' so it can be looped through later to find the border with the smallest length            
+                listofborderlengths.append((country_a.NAME, country_b.NAME, border_length))
+                    
+    '''
+    Part 4: Main Code: Finding the smallest border 
+    '''       
+    
+    '''4.1 Finding The Shortest Border in the List of Border Lengths'''                     
+    
+    #loop through borders in the list of all bordering countries and their lengths
+    for borders in listofborderlengths:
+    
+    #borders[2] locates the border_length column in the listofborderlengths and smallest_length value (inf) is called upon to create if loop   
+      if borders[2] < smallest_length:
+          
+    #smallest length is replaced with the border_length of the border with the small length      
+          smallest_length = borders[2]
+          
+    #shortest_border defined as border pair with the smallest_length in the loop      
+          shortest_border = borders
+    
+    #print statement shows country_a, who they border (country_b) and the length of the border in meters
+    print(shortest_border)
+    
+    '''
+    Part 5: Creating the Map 
+    '''        
+    
+    '''5.1 Projection and Buffer Chosen'''   
+    
+    #Equidistant projection (oblique azimuthal equidistant) used as it is a global projection and therefore can be used no matter what the results are
+    #Preferably a local conformal projection would be used to retain the shape, as the border has already been measured, however this would mean code could not be repeated             
+    oae = '+proj=aeqd +lon_0=0 +lat_0=0 +datum=WGS84 +units=m +no_defs'
+    
+    #extract geodata frames from shortest_border using .loc to locate the column for NAME, [0] = country_a, [1] = country_b
+    #if the name matches those of the shortest border, it becomes country_a and country_b
+    country_a = countries.loc[countries.NAME == shortest_border[0]]
+    country_b = countries.loc[countries.NAME == shortest_border[1]]
+    
+    #reprojects the shortest border using intersections function from earlier to show the border (or intersection) between the geometries of country_a and country_b using the new CRS
+    shortest_border_proj = country_a.to_crs(oae).geometry.iloc[0].intersection(country_b.to_crs(oae).geometry.iloc[0])
+    
+    #create map axis object
+    my_fig, my_ax = subplots(1, 1, figsize=(16, 10))
+    
+    #remove axes, visually unappealing, doesn't add anything to the map
+    my_ax.axis('off') 
+    
+    #extract the bounds from the shortest border projetion using .bounds, 
+    #this will be used below to set a buffer around the border, rather than the larger country (in this case, Italy), otherwise you would not even be able to see the Vatican
+    minx, miny, maxx, maxy = shortest_border_proj.bounds
+    
+    #bounds set to a 100m buffer around the border itself, allows for border to be clearly in the frame
+    buffer = 100
+    
+    #using the established buffer above limits are set using the .set_x/ylim on my_ax center the border
+    my_ax.set_xlim([minx - buffer, maxx + buffer])
+    my_ax.set_ylim([miny - buffer, maxy + buffer])
+        
+    '''5.2 Plotting Data'''
+    
+    #country_a and country_b with new projection are plotted onto the map using geopandas .plot
+    country_a.to_crs(oae).plot(
+        
+        #draw the countries geometry on already established axis from earlier
+        ax = my_ax,
+        
+        #line colour removed here as there is no need for it at such a small scale
+        color = '#228B22',
+        )
+    
+    #process repeated for country_b
+    country_b.to_crs(oae).plot(
+        ax = my_ax,
+        
+        #contrasting colour to country_b chosen to distinguish between them
+        color = '#ffeb70',
+        )
+    
+    #Geoseries used down here instead as error 'MultiLineString' object has no attribute 'plot' error came up earlier (due to data within border variable, so it had to be redefined to only include a geometry)
+    #Geoseries being used down here creates a single geometry for the border projection to avoid this error (a set of lines)
+    GeoSeries([shortest_border_proj]).plot(     
+        ax = my_ax,
+        color = '#003366',
+        
+        #thicker linewidth chosen to improve legibility
+        linewidth = 4,
+        )
+    
+    '''5.3 Map Presentation'''
+    
+    #add title
+    title("Shortest International Border Between Two Countries")
+    
+    #add legend showing Country A, Country B and the Shortest Border
+    #Handles used to create a list of variables in the legend
+    my_ax.legend(handles=[
+       
+        #calling back to shortest_border using [0] and [1] for the label to make sure the label says the countries name and not country_a and country_b
+        #use of Patch to assingn colour (matched to projection colour) and label for the legend
+            Patch(facecolor='#228B22', label=shortest_border[0]),
+            Patch(facecolor='#ffeb70', label=shortest_border[1]),
+            
+        #use of Line2D to create a line to show the the border, again colour and width matched with projection from earlier    
+            Line2D([0], [0], color='#003366',  lw=4, label='Shortest Border')
+        
+        #Brackets closed and legend positioned in the upper left
+        ],loc='upper left')
+    
+    #add north arrow
+    #positions the arrow within the PNG, (x and y show where in the PNG the arrow is), arrow_length adjusts length of the arrow
+    x, y, arrow_length = 0.97, 0.98, 0.12
+    
+    #use of my_ax.annotate to further adjust positioning of the arrow
+    my_ax.annotate('N', xy=(x, y), xytext=(x, y-arrow_length),
+     	arrowprops=dict(facecolor='black', width=5, headwidth=15),
+     	ha='center', va='center', fontsize=20, xycoords=my_ax.transAxes)
+    
+    #add scalebar
+    #my_ax.add_artist used to adjust features of the scalebar, length fraction determines the length of the scale used in relation to size of the image
+    my_ax.add_artist(ScaleBar(dx=1, units="m", location="lower left", length_fraction=1))
+    
+    #save the result, bbox used to control size of the bounding box
+    savefig('out/2.png', bbox_inches='tight')
+    
+    # --- NO CODE BELOW HERE ---
+    
+    #report runtime and end timer
+    print(f"completed in: {perf_counter() - start_time} seconds")
+    
+    #print the result
+    print("done!")
