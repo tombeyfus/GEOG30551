@@ -1,0 +1,269 @@
+# THIS IMPORTS A SQUARE ROOT FUNCTION, WHICH IS A BIG HINT!!
+from math import sqrt
+
+x1 = 345678
+y1 = 456789
+x2 = 445678
+y2 = 556789
+
+def distance(x1, y1, x2, y2):
+    distance = sqrt((y2-y1)**2+(x2-x1)**2)
+	
+    """
+	* Use Pythagoras' theorem to measure the distance. This is acceptable in this case because:
+	*	 - the CRS of the data is a local projection
+	*	 - the distances are short
+	*  - computational efficiency is important (as we are making many measurements)
+	"""
+    
+    return distance # complete this line to return the distance between (x1,y1) and (x2,y2)
+print(distance(x1, y1, x2, y2))
+
+from geopandas import read_file
+from shapely import STRtree
+from matplotlib_scalebar.scalebar import ScaleBar
+from matplotlib.pyplot import subplots, savefig, title
+
+# read in shapefiles, ensure that they all have the same CRS
+pop_points = read_file("../../data/gulu/pop_points.shp")
+water_points = read_file("../../data/gulu/water_points.shp")
+gulu_district = read_file("../../data/gulu/district.shp")
+
+# read in the `water_points` dataset AND transform it the the same CRS as `pop_points`
+water_points = read_file("../../data/gulu/water_points.shp").to_crs(pop_points.crs)
+
+#printing ESPG code
+print(pop_points.crs.to_epsg())
+print(water_points.crs.to_epsg())
+print(gulu_district.crs.to_epsg())
+
+#print(pop_points)
+#print(water_points)
+#print(gulu_district)
+
+print(f"population points: {len(pop_points.index)}")
+#print(f"Initial wells: {len(water_points.index)}")
+
+# get the geometries from the water points geodataframe as a list
+geoms = water_points.geometry.to_list()
+
+# initialise an instance of an STRtree using the geometries
+idx = STRtree(geoms)
+
+# get the one and only polygon from the district dataset
+polygon = gulu_district.geometry.iloc[0].buffer(10,500)
+
+#polygon.buffer(10,500)
+
+# how many rows are we starting with?
+print(f"Initial wells: {len(water_points.index)}")
+
+# get the indexes of wells that intersect bounds of the district
+possible_matches_index = idx.query(polygon)
+
+# use those indexes to extract the possible matches from the GeoDataFrame
+possible_matches = water_points.iloc[possible_matches_index]
+
+
+
+# then search the possible matches for precise matches using the slower but more precise method
+precise_matches = possible_matches.loc[possible_matches.within(polygon)]
+
+# how many rows are left now?
+print(f"Potential wells: {len(possible_matches.index)}")
+
+# how many rows are left now? 
+print(f"Filtered wells: {len(precise_matches.index)}")
+
+geoms2 = precise_matches.geometry.to_list()
+
+# rebuild the spatial index using the new, smaller dataset
+idx = STRtree(geoms2)
+
+
+
+
+distances = []
+for id, house in pop_points.iterrows():
+    #print(id)
+    #print(house.geometry)
+    #print(house.name)
+    #print(house["name"])
+    nearest_well_index = idx.nearest(house.geometry)
+    nearest_well = precise_matches.iloc[nearest_well_index].geometry.geoms[0]
+    distances.append(distance(house.geometry.x, house.geometry.y, nearest_well.x, nearest_well.y))
+
+
+#print(len())
+    
+    
+    
+    #distances.append(distance(sqrt((nearest_well.geometry.y-house.geometry.y)**2+(nearest_well.geometry.x-house.geometry.x)**2)))
+                              
+ #(house.geometry.x, house.geometry.y, nearest_well.geometry.x, nearest_well.geometry.y))
+   
+    
+   #nearest_well = idx.nearest(precise_matches.iloc.geometry)
+    
+    
+
+# print(house.geometry)
+# print(nearest_well.geometry)
+#print(len(distances_list))
+
+print(distances[:5])
+
+mean = sum(distances) / len(distances)
+print(mean)
+
+# store distance to nearest well
+pop_points['nearest_well'] = distances
+
+
+
+print(f"Minimum distance to water in Gulu District: {min(distances):,.0f}m.")
+print(f"Mean distance to water in Gulu District: {mean:,.0f}m.")
+print(f"Maximum distance to water in Gulu District: {max(distances):,.0f}m.")
+
+# create map axis object
+fig, my_ax = subplots(1, 1, figsize=(16, 10))
+
+# remove axes
+my_ax.axis('off')
+
+# add title
+title("Distance to Nearest Well, Gulu District, Uganda")
+
+# add the district boundary
+gulu_district.plot(
+    ax = my_ax,
+    color = (0, 0, 0, 0),	# this is (red, green, blue, alpha) and means black, but transparent (alpha=0)
+    linewidth = 1,
+	edgecolor = 'black',		# this is just a shortcut for (0, 0, 0, 1)
+    )
+
+# plot the locations, coloured by distance to water
+pop_points.plot(
+    ax = my_ax,
+    column = 'nearest_well',
+    linewidth = 0,
+	markersize = 1,
+    cmap = 'RdYlGn',
+    scheme = 'quantiles',
+    legend = 'True',
+    legend_kwds = {
+        'loc': 'lower right',
+        'title': 'Distance to Nearest Well'
+        }
+    )
+
+# add north arrow
+x, y, arrow_length = 0.98, 0.99, 0.1
+my_ax.annotate('N', xy=(x, y), xytext=(x, y-arrow_length),
+	arrowprops=dict(facecolor='black', width=5, headwidth=15),
+	ha='center', va='center', fontsize=20, xycoords=my_ax.transAxes)
+
+# add scalebar
+my_ax.add_artist(ScaleBar(dx=1, units="m", location="lower left", length_fraction=0.25))
+
+# save the result
+savefig('out/3.png', bbox_inches='tight')
+print("done!")
+
+
+
+# """
+# Understanding GIS: Practical 3 (Vectorised Alternative)
+# @author jonnyhuck
+
+# This approach uses higher-level functionality of geopandas to speed up the analysis
+# """
+
+# from time import perf_counter
+# from geopandas import read_file
+# from matplotlib.pyplot import subplots, savefig
+# from matplotlib_scalebar.scalebar import ScaleBar
+
+# # set start time
+# start_time = perf_counter() 
+
+# # read in the shapefiles, and match up the CRS'
+# pop_points = read_file("./data/gulu/pop_points.shp")
+# water_points = read_file("./data/gulu/water_points.shp").to_crs(pop_points.crs)
+# gulu_district = read_file("./data/gulu/district.shp").to_crs(pop_points.crs)
+
+# ''' STAGE 1 - FILTERING THE DATA WITH A SPATIAL QUERY - EXTRACT ONLY WELLS INSIDE THE DISTRICT '''
+
+# # get the one and only polygon from the district dataset (buffer by 10.5km to account for edge cases)
+# polygon = gulu_district.geometry.iloc[0].buffer(10500)
+
+# # construct the spatial index
+# water_points.sindex
+
+# # get the wells within the district
+# print(f"\nInitial wells: {len(water_points)}")
+# precise_matches = water_points.loc[water_points.within(polygon)]
+# print(f"Filtered wells: {len(water_points)}")
+
+
+# ''' STAGE 2 - NEAREST NEIGHBOUR - find distance to nearest well for everybody'''
+
+# # ensure a new spatial index has been constructed on the new, smaller dataset
+# precise_matches.sindex
+
+# # use vectorised neares neighbour & distance calc
+# _, distances = precise_matches.sindex.nearest(pop_points.geometry, return_all=False, return_distance=True)
+# pop_points["nearest_well"] = distances
+
+# # output the result
+# print(f"Minimum distance to water in Gulu District: {pop_points['nearest_well'].min():,.0f}m.")
+# print(f"Mean distance to water in Gulu District: {pop_points['nearest_well'].mean():,.0f}m.")
+# print(f"Maximum distance to water in Gulu District: {pop_points['nearest_well'].max():,.0f}m.")
+
+# # finish timer
+# print(f"completed in: {perf_counter() - start_time:.2f} seconds")
+
+# # create map axis object
+# fig, my_ax = subplots(1, 1, figsize=(16, 10))
+
+# # remove axes
+# my_ax.axis('off')
+
+# # add title
+# my_ax.set_title("Distance to Nearest Well, Gulu District, Uganda")
+
+# # add the district boundary
+# gulu_district.plot(
+#     ax = my_ax,
+#     color = (0, 0, 0, 0),	# this is (red, green, blue, alpha) and means black, but transparent (alpha=0)
+#     linewidth = 1,
+#  	edgecolor = 'black',	# this is just a shortcut for (0, 0, 0, 1)
+#     )
+
+# # plot the locations, coloured by distance to water
+# pop_points.plot(
+#     ax = my_ax,
+#     column = 'nearest_well',
+#     linewidth = 0,
+#  	markersize = 1,
+#     cmap = 'RdYlBu_r',
+#     scheme = 'quantiles',
+#     legend = 'True',
+#     legend_kwds = {
+#         'loc': 'lower right',
+#         'title': 'Distance to Nearest Well'
+#         }
+#     )
+
+# # add north arrow
+# x, y, arrow_length = 0.98, 0.99, 0.1
+# my_ax.annotate('N', xy=(x, y), xytext=(x, y-arrow_length),
+#  	arrowprops=dict(facecolor='black', width=5, headwidth=15),
+#  	ha='center', va='center', fontsize=20, xycoords=my_ax.transAxes)
+
+# # add scalebar
+# my_ax.add_artist(ScaleBar(dx=1, units="m", location="lower left", length_fraction=0.25))
+
+# # save the result
+# savefig('out/3-vector.png', bbox_inches='tight')
+# print("done!")
